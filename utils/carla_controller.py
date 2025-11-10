@@ -129,6 +129,32 @@ class CarlaController:
         world = camera_actor.get_transform().transform(local)
         return world.x, world.y, world.z
 
+    # ========== NAVIGATION ========== #
+    def drive_to_location(self, target_xyz):
+        if not BasicAgent:
+            print("BasicAgent not available.")
+            return False
+        if not self.vehicle:
+            print("Vehicle not spawned.")
+            return False
+
+        target_loc = carla.Location(*target_xyz)
+        agent = BasicAgent(self.vehicle, target_speed=20.0)  # km/h
+        agent.set_destination((target_loc.x, target_loc.y, target_loc.z))
+
+        while True:
+            world_snapshot = self.world.wait_for_tick()
+            control = agent.run_step()
+            self.vehicle.apply_control(control)
+
+            # Check distance to target
+            vehicle_loc = self.vehicle.get_location()
+            dist = vehicle_loc.distance(target_loc)
+            if dist < 2.0:
+                print("Reached target!")
+                break
+        return True
+    
     # ========== ACTION HANDLING ========== #
     def act(self, action, pixel_dest=None):
         try:
@@ -142,33 +168,18 @@ class CarlaController:
                     print('No depth image yet.')
                     return
 
+                # Reproject target pixel to world coordinates
                 world_x, world_y, world_z = self.reproject_pixel_to_world(
                     u, v, self.last_depth_raw, self.rgb_camera,
                     self.last_depth_width, self.last_depth_height)
 
                 print(f"Pixel ({u},{v}) → World ({world_x:.2f},{world_y:.2f},{world_z:.2f})")
-
                 target = (world_x, world_y, world_z)
-                if BasicAgent:
-                    success = self.drive_to_location_agent(target)
-                else:
-                    success = self.drive_to_location(target)
-                print("Navigation success:", success)
+
+                # Drive to the computed world location
+                success = self.drive_to_location(target)
                 return
 
-            control = carla.VehicleControl()
-            if action == 'stop':
-                control.brake = 1.0
-            elif action == 'turn_left':
-                control.throttle, control.steer = 0.4, -0.5
-            elif action == 'turn_right':
-                control.throttle, control.steer = 0.4, 0.5
-            else:
-                print(f"Unknown action: {action}")
-                return
-
-            self.vehicle.apply_control(control)
-            print(f"Executed action: {action}")
         except Exception as e:
             print("Error executing action:", e)
 
