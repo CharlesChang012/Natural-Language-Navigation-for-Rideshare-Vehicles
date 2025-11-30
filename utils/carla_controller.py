@@ -156,14 +156,22 @@ class CarlaController:
         return True
     
     # ========== ACTION HANDLING ========== #
-    def act(self, action, pixel_dest=None):
+    def act(self, action):
         try:
-            if action in ('goto_pixel', 'goto_image_point'):
-                if not pixel_dest or len(pixel_dest) < 2:
-                    print('goto_pixel requires [u, v]')
+            if isinstance(action, str):
+                if action == "STOP":
+                    print("Received STOP command. Stopping vehicle...")
+                    self.vehicle.apply_control(carla.VehicleControl(throttle=0.0, brake=1.0))
+                    return
+                else:
+                    print(f"Unknown string action: {action}")
+                    return
+            elif isinstance(action, list):
+                if not action or len(action) < 2:
+                    print('Target pixel requires [u, v]')
                     return
 
-                u, v = int(pixel_dest[0]), int(pixel_dest[1])
+                u, v = int(action[0]), int(action[1])
                 if not self.last_depth_raw:
                     print('No depth image yet.')
                     return
@@ -193,14 +201,8 @@ class CarlaController:
         tmp.close()
         try:
             self.last_rgb_image.save_to_disk(tmp_name)
-            out = self.vlm.interpret_image(tmp_name)
-            if isinstance(out, str):
-                try:
-                    out = json.loads(out)
-                except Exception:
-                    out = {"action": out}
-            if out and "action" in out:
-                self.act(out["action"], out.get("pixel_dest"))
+            action = self.vlm.interpret_image(tmp_name)
+            self.act(action)
         except Exception as e:
             print("VLM tick failed:", e)
         finally:
