@@ -28,10 +28,12 @@ class CarlaController:
         self.last_depth_width = None
         self.last_depth_height = None
 
-        # Vision-language model interface
+        # Vision-language interface
         self.vlm = DummyVLM()
 
-    # ========== VEHICLE & SENSOR SETUP ========== #
+    # =============================================================
+    # VEHICLE & SENSOR SETUP
+    # =============================================================
     def spawn_vehicle(self):
         blueprint_lib = self.world.get_blueprint_library()
         vehicle_bp = blueprint_lib.filter('vehicle.tesla.model3')[0]
@@ -83,15 +85,15 @@ class CarlaController:
         print(f"Spawned RGB-D sensors -> {rgb_dir}, {depth_dir}")
         return self.rgb_camera, self.depth_camera
 
-    # ========== DEPTH REPROJECTION ========== #
+    # =============================================================
+    # DEPTH REPROJECTION
+    # =============================================================
     def carla_depth_to_meters(self, image, width=None, height=None):
         if isinstance(image, carla.Image):
             raw = image.raw_data
             w, h = image.width, image.height
         elif isinstance(image, (bytes, bytearray)) and width and height:
             raw, w, h = image, width, height
-        elif isinstance(image, np.ndarray):
-            return image.astype(np.float32)
         else:
             raise ValueError("Unsupported depth format")
 
@@ -109,8 +111,7 @@ class CarlaController:
             depth_map = self.carla_depth_to_meters(depth_image, depth_width, depth_height)
             width, height = depth_width, depth_height
         else:
-            depth_map = np.array(depth_image, dtype=np.float32)
-            height, width = depth_map.shape
+            raise ValueError("Unsupported depth format")
 
         z = float(depth_map[int(v), int(u)])
         if z <= 0.0:
@@ -119,86 +120,125 @@ class CarlaController:
         fov = float(camera_actor.attributes.get('fov', 90.0))
         cx, cy = width / 2.0, height / 2.0
         fx = width / (2.0 * math.tan(math.radians(fov) / 2.0))
-        fy = fx
 
         x_cam = (u - cx) * z / fx
-        y_cam = (v - cy) * z / fy
+        y_cam = (v - cy) * z / fx
         z_cam = z
 
         local = carla.Location(x=z_cam, y=-x_cam, z=-y_cam)
         world = camera_actor.get_transform().transform(local)
         return world.x, world.y, world.z
 
-    # ========== NAVIGATION ========== #
-    def drive_to_location(self, target_xyz):
+    # =============================================================
+    # ROAD-RULES HELPERS
+    # =============================================================
+    def get_valid_waypoint_ahead(self, transform, distance=20.0):
+        """
+        Return a legal CARLA waypoint ahead of the given transform.
+        """
+        map_ = self.world.get_map()
+        wp = map_.get_waypoint(transform.location, project_to_road=True)
+
+        travelled = 0.0
+        while travelled < distance:
+            next_wps = wp.next(1.0)
+            if not next_wps:
+                break
+            wp = next_wps[0]
+            travelled += 1.0
+
+        wp = map_.get_waypoint(wp.transform.location, project_to_road=True)
+        return wp
+
+    def drive_to_waypoint_road_rules(self, target_location):
+        """
+        Drive using BasicAgent while following road rules.
+        """
         if not BasicAgent:
             print("BasicAgent not available.")
             return False
-        if not self.vehicle:
-            print("Vehicle not spawned.")
-            return False
 
-        target_loc = carla.Location(*target_xyz)
-        agent = BasicAgent(self.vehicle, target_speed=20.0)  # km/h
-        agent.set_destination((target_loc.x, target_loc.y, target_loc.z))
+        agent = BasicAgent(self.vehicle, target_speed=25.0)
+        agent.set_destination((target_location.x, target_location.y, target_location.z))
+
+        print(f"[ROAD RULES] Driving to {target_location}")
 
         while True:
-            world_snapshot = self.world.wait_for_tick()
+            self.world.tick()
             control = agent.run_step()
             self.vehicle.apply_control(control)
 
-            # Check distance to target
-            vehicle_loc = self.vehicle.get_location()
-            dist = vehicle_loc.distance(target_loc)
-            if dist < 2.0:
-                print("Reached target!")
+            if self.vehicle.get_location().distance(target_location) < 1.5:
+                print("[ROAD RULES] Target reached.")
                 break
+
         return True
-    
-    # ========== ACTION HANDLING ========== #
+
+    # =============================================================
+    # ACTION HANDLER
+    # =============================================================
     def act(self, action):
         try:
+            # -----------------------------------------
+            # STOP command
+            # -----------------------------------------
             if isinstance(action, str):
                 if action == "STOP":
-                    print("Received STOP command. Stopping vehicle...")
+                    print("STOP command received.")
                     self.vehicle.apply_control(carla.VehicleControl(throttle=0.0, brake=1.0))
                     return
                 else:
-                    print(f"Unknown string action: {action}")
+                    print(f"Unknown action string: {action}")
                     return
-            elif isinstance(action, list):
-                if not action or len(action) < 2:
-                    print('Target pixel requires [u, v]')
-                    return
+
+            # -----------------------------------------
+            # Pixel click → world target → road projection
+            # -----------------------------------------
+            elif isinstance(action, list) and len(action) >= 2:
 
                 u, v = int(action[0]), int(action[1])
+
                 if not self.last_depth_raw:
-                    print('No depth image yet.')
+                    print("No depth image available.")
                     return
 
-                # Reproject target pixel to world coordinates
-                world_x, world_y, world_z = self.reproject_pixel_to_world(
-                    u, v, self.last_depth_raw, self.rgb_camera,
-                    self.last_depth_width, self.last_depth_height)
+                wx, wy, wz = self.reproject_pixel_to_world(
+                    u, v,
+                    self.last_depth_raw,
+                    self.rgb_camera,
+                    self.last_depth_width,
+                    self.last_depth_height
+                )
+                print(f"[ACT] Pixel ({u},{v}) → World ({wx:.2f}, {wy:.2f}, {wz:.2f})")
 
-                print(f"Pixel ({u},{v}) → World ({world_x:.2f},{world_y:.2f},{world_z:.2f})")
-                target = (world_x, world_y, world_z)
+                world_loc = carla.Location(wx, wy, wz)
+                map_ = self.world.get_map()
 
-                # Drive to the computed world location
-                success = self.drive_to_location(target)
-                return
+                # Snap clicked point onto road
+                wp_nearest = map_.get_waypoint(world_loc, project_to_road=True)
+
+                # Compute ahead waypoint
+                wp_ahead = self.get_valid_waypoint_ahead(wp_nearest.transform, distance=20.0)
+
+                road_target = wp_ahead.transform.location
+                print(f"[ACT] Road-projected target: {road_target}")
+
+                return self.drive_to_waypoint_road_rules(road_target)
 
         except Exception as e:
             print("Error executing action:", e)
 
-    # ========== AUTOMATIC TICK (VLM LOOP) ========== #
+    # =============================================================
+    # VLM TICK LOOP
+    # =============================================================
     def tick(self):
-        """Call this each simulation step to let VLM decide next action."""
         if not self.vlm or not self.last_rgb_image:
             return
+
         tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
         tmp_name = tmp.name
         tmp.close()
+
         try:
             self.last_rgb_image.save_to_disk(tmp_name)
             action = self.vlm.interpret_image(tmp_name)
@@ -208,19 +248,22 @@ class CarlaController:
         finally:
             try:
                 os.remove(tmp_name)
-            except Exception:
+            except:
                 pass
 
+    # =============================================================
+    # CLEANUP
+    # =============================================================
     def destroy(self):
         for s in getattr(self, 'sensors', []):
             try:
                 s.stop()
                 s.destroy()
-            except Exception:
+            except:
                 pass
         if self.vehicle:
             try:
                 self.vehicle.destroy()
-            except Exception:
+            except:
                 pass
         print("Vehicle and sensors destroyed.")
