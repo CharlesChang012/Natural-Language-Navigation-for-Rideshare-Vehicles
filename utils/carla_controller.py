@@ -5,7 +5,7 @@ import os
 import math
 import numpy as np
 import tempfile
-from utils.vlm_agent import DummyVLM
+from utils.vision_navigation import RoadAwareNavigator
 try:
     from agents.navigation.basic_agent import BasicAgent
 except Exception:
@@ -29,7 +29,7 @@ class CarlaController:
         self.last_depth_height = None
 
         # Vision-language interface
-        self.vlm = DummyVLM()
+        self.navigator = RoadAwareNavigator()
 
     # =============================================================
     # VEHICLE & SENSOR SETUP
@@ -172,35 +172,33 @@ class CarlaController:
                 print("[ROAD RULES] Target reached.")
                 break
 
-        return True
-
     # =============================================================
     # ACTION HANDLER
     # =============================================================
-    def act(self, action):
+    def act(self, nav_result):
         try:
             # -----------------------------------------
             # STOP command
             # -----------------------------------------
-            if isinstance(action, str):
-                if action == "STOP":
+            if isinstance(nav_result['action'], str):
+                if nav_result['action'] == "STOP":
                     print("STOP command received.")
                     self.vehicle.apply_control(carla.VehicleControl(throttle=0.0, brake=1.0))
-                    return
+                    return True
                 else:
-                    print(f"Unknown action string: {action}")
-                    return
+                    print(f"Unknown action string: {nav_result['action']}")
+                    return True
 
             # -----------------------------------------
             # Pixel click → world target → road projection
             # -----------------------------------------
-            elif isinstance(action, list) and len(action) >= 2:
+            elif isinstance(nav_result['action'], list) and len(nav_result['action']) >= 2:
 
-                u, v = int(action[0]), int(action[1])
+                u, v = int(nav_result['action'][0]), int(nav_result['action'][1])
 
                 if not self.last_depth_raw:
                     print("No depth image available.")
-                    return
+                    return True
 
                 wx, wy, wz = self.reproject_pixel_to_world(
                     u, v,
@@ -223,7 +221,9 @@ class CarlaController:
                 road_target = wp_ahead.transform.location
                 print(f"[ACT] Road-projected target: {road_target}")
 
-                return self.drive_to_waypoint_road_rules(road_target)
+                self.drive_to_waypoint_road_rules(road_target)
+
+                return False
 
         except Exception as e:
             print("Error executing action:", e)
@@ -232,7 +232,7 @@ class CarlaController:
     # VLM TICK LOOP
     # =============================================================
     def tick(self):
-        if not self.vlm or not self.last_rgb_image:
+        if not self.navigator or not self.last_rgb_image:
             return
 
         tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
@@ -241,8 +241,9 @@ class CarlaController:
 
         try:
             self.last_rgb_image.save_to_disk(tmp_name)
-            action = self.vlm.interpret_image(tmp_name)
-            self.act(action)
+            nav_result = self.navigator.navigate(self.last_rgb_image, "Navigate to traffic light", oad_aware=True)
+            goal_reached = self.act(nav_result)
+            return goal_reached
         except Exception as e:
             print("VLM tick failed:", e)
         finally:

@@ -19,7 +19,10 @@ def main():
         start_time = time.time()
         while time.time() - start_time < 60:
             world.tick()          # advance one simulation step (if running in synchronous mode)
-            controller.tick()     # get image -> VLM -> act()
+            goal_reached = controller.tick()     # get image -> VLM -> act()
+            if goal_reached:
+                print("Goal reached, stopping simulation.")
+                break
             time.sleep(0.1)       # small delay to simulate control rate (10 Hz)
 
     except KeyboardInterrupt:
